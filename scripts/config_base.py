@@ -50,7 +50,7 @@ MIN_SLEEP_BETWEEN_POSTS = 40   # 초
 MAX_SLEEP_BETWEEN_POSTS = 110  # 초
 
 # ── Gemini 설정 ──────────────────────────────────────────────
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 # 글 구조/각도를 매번 랜덤하게 섞어서 색인 다양성 확보 (기존 kpop 블로그 패턴과 동일)
 WRITING_ANGLES = [
