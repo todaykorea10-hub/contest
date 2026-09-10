@@ -20,6 +20,8 @@ import difflib
 import urllib.parse
 import xml.etree.ElementTree as ET
 
+import re
+
 import requests
 from bs4 import BeautifulSoup
 from google.oauth2.credentials import Credentials
