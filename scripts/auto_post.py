@@ -259,8 +259,6 @@ def main():
 
         attempts += 1
         print(f"[4/4] 작성 중: {article['title']}")
-
-        print(f"[4/4] 작성 중: {article['title']}")
         try:
             real_url = resolve_real_url(article["link"])
 
