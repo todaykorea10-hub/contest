@@ -130,6 +130,20 @@ def is_duplicate(title: str, existing_titles) -> bool:
 # ────────────────────────────────────────────────────────────
 # 원문 기사 대표 이미지 추출
 # ────────────────────────────────────────────────────────────
+
+def resolve_real_url(google_news_link: str) -> str:
+    """Google News RSS 링크를 실제 언론사 기사 URL로 변환"""
+    try:
+        resp = requests.get(google_news_link, headers={"User-Agent": UA}, timeout=10, allow_redirects=True)
+        if "news.google.com" not in resp.url:
+            return resp.url
+        m = re.search(r'<meta\s+http-equiv=["\']refresh["\']\s+content=["\']\d+;\s*url=([^"\']+)["\']', resp.text, re.I)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return google_news_link  # 실패 시 원래 링크 그대로 사용
+  
 def extract_og_image(article_url: str):
     try:
         resp = requests.get(article_url, headers={"User-Agent": UA}, timeout=10, allow_redirects=True)
