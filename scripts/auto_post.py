@@ -255,14 +255,16 @@ def main():
 
         print(f"[4/4] 작성 중: {article['title']}")
         try:
+            real_url = resolve_real_url(article["link"])
+
             title, body = generate_post(gemini_client, article, article["topic_key"])
 
             if is_duplicate(title, existing_titles + posted_titles_this_run):
                 print("  -> 재작성된 제목이 기존 글과 유사하여 건너뜀")
                 continue
 
-            image_url = extract_og_image(article["link"])
-            html_content = build_html(body, image_url, article["link"])
+            image_url = extract_og_image(real_url)
+            html_content = build_html(body, image_url, real_url)
             labels = cfg.labels_for(article["topic_key"])
 
             result = publish_post(service, blog_id, title, html_content, labels)
