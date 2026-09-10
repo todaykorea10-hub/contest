@@ -244,14 +244,21 @@ def main():
     gemini_client = genai.Client(api_key=secrets["GEMINI_API_KEY"])
 
     posted = 0
+    attempts = 0
     posted_titles_this_run = []
 
     for article in candidates:
         if posted >= cfg.MAX_POSTS_PER_RUN:
             break
+        if attempts >= cfg.MAX_ATTEMPTS_PER_RUN:
+            print("  -> 최대 시도 횟수에 도달해 이번 실행을 종료합니다")
+            break
 
         if is_duplicate(article["title"], existing_titles + posted_titles_this_run):
             continue
+
+        attempts += 1
+        print(f"[4/4] 작성 중: {article['title']}")
 
         print(f"[4/4] 작성 중: {article['title']}")
         try:
