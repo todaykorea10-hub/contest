@@ -259,7 +259,10 @@ def main():
 
         except Exception as e:
             print(f"  -> 실패, 다음 기사로 넘어감: {e}")
-            time.sleep(15)
+            if "429" in str(e) or "rateLimitExceeded" in str(e):
+                time.sleep(60)   # rate limit이면 더 길게 대기
+            else:
+                time.sleep(15)
             continue
 
     print(f"\n완료: 이번 실행에서 {posted}건 게시함")
