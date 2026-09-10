@@ -57,7 +57,7 @@ def get_recent_post_titles(service, blog_id):
             blogId=blog_id,
             maxResults=cfg.RECENT_POSTS_TO_CHECK,
             fetchBodies=False,
-            status="live",
+            status="LIVE",
         ).execute()
         for item in resp.get("items", []):
             titles.append(item.get("title", ""))
