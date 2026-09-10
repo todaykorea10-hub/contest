@@ -35,19 +35,20 @@ TOPIC_LABELS = {
 }
 
 # ── Google News RSS 설정 ────────────────────────────────────
-NEWS_RECENCY_DAYS = 5          # when:Nd
+NEWS_RECENCY_DAYS = 1          # when:Nd
 NEWS_LANG = "ko"
 NEWS_COUNTRY = "KR"
-MAX_ARTICLES_PER_KEYWORD = 6   # 키워드당 최대 수집 기사 수
+MAX_ARTICLES_PER_KEYWORD = 10   # 키워드당 최대 수집 기사 수
 
 # ── 중복 방지 ────────────────────────────────────────────────
 TITLE_SIMILARITY_THRESHOLD = 0.72   # difflib 유사도, 이 이상이면 중복 취급
 RECENT_POSTS_TO_CHECK = 60          # Blogger에서 최근 몇 건 제목을 가져와 중복체크할지
 
 # ── 게시 상한 (스팸 방지) ───────────────────────────────────
-MAX_POSTS_PER_RUN = 2          # 한 번 실행(Actions 1회)당 최대 게시 수
-MIN_SLEEP_BETWEEN_POSTS = 40   # 초
-MAX_SLEEP_BETWEEN_POSTS = 110  # 초
+MAX_POSTS_PER_RUN = 10          # 한 번 실행(Actions 1회)당 최대 게시 수
+MIN_SLEEP_BETWEEN_POSTS = 600   # 초
+MAX_SLEEP_BETWEEN_POSTS = 1200  # 초
+MAX_ATTEMPTS_PER_RUN = 10   # 실패 포함 최대 시도 횟수 (무한정 90개를 다 돌지 않도록)
 
 # ── Gemini 설정 ──────────────────────────────────────────────
 GEMINI_MODEL = "gemini-3.5-flash-lite"
