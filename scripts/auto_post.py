@@ -150,7 +150,10 @@ def extract_og_image(article_url: str):
         soup = BeautifulSoup(resp.text, "html.parser")
         tag = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
         if tag and tag.get("content"):
-            return tag["content"]
+            img_url = tag["content"]
+            if "google.com" in img_url or "gstatic.com" in img_url:
+                return None  # 구글 자체 로고/썸네일은 사용하지 않음
+            return img_url
     except Exception as e:
         print(f"[정보] 대표 이미지 추출 실패: {e}")
     return None
