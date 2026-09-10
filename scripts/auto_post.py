@@ -257,8 +257,9 @@ def main():
                 print(f"  -> {wait}초 대기 후 다음 글 처리")
                 time.sleep(wait)
 
-        except Exception as e:
+          except Exception as e:
             print(f"  -> 실패, 다음 기사로 넘어감: {e}")
+            time.sleep(15)   # 이 줄 추가 — 연속 실패 시 API 요청 속도 완화
             continue
 
     print(f"\n완료: 이번 실행에서 {posted}건 게시함")
