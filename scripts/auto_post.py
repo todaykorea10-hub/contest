@@ -7,10 +7,11 @@
   2) Blogger에서 최근 게시글 제목을 가져와 중복(유사) 기사 제거
   3) 후보 기사 중 MAX_POSTS_PER_RUN개를 골라 Gemini로 블로그 글 재작성
      (본문 + 핵심 키워드(태그)까지 함께 생성)
-  4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤,
-     헤더/광고/관련기사 영역을 제외한 본문에서만 이미지를 추출
-     (실제로 찾은 만큼만 사용, 억지로 개수를 채우지 않음. 같은 사진의
-      다른 크기/도메인 URL까지 파일명 기반으로 2차 중복 판정),
+  4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤 (AMP 페이지면
+     일반 페이지 URL로 우선 변환), 헤더/광고/관련기사 영역을 제외한 본문에서만
+     이미지를 추출 (일반 <img>와 AMP의 <amp-img> 모두 인식,
+     실제로 찾은 만큼만 사용, 억지로 개수를 채우지 않음.
+     같은 사진의 다른 크기/도메인 URL까지 파일명 기반으로 2차 중복 판정),
      상단/중간/하단에 분산 배치
   5) Blogger API로 게시 (라벨 = 공통 라벨 + 주제 + 본문 키워드, 본문 하단에 해시태그),
      각 게시 사이에 무작위 대기 (스팸 방지)
@@ -160,6 +161,13 @@ def resolve_real_url(google_news_link: str) -> str:
     return google_news_link  # 실패 시 원래 링크 그대로 사용
 
 
+def _to_non_amp_url(url: str) -> str:
+    """AMP 전용 페이지(articleViewAmp.html 등)는 메타태그가 부실하거나
+    <amp-img> 태그를 써서 이미지 추출이 잘 안 되는 경우가 많다.
+    가능하면 일반 페이지 URL로 바꿔서 먼저 시도한다."""
+    return re.sub(r"(?i)ArticleViewAmp\.html", "ArticleView.html", url)
+
+
 # 구글/광고 네트워크 도메인
 BLOCKED_IMAGE_DOMAINS = (
     "google.com", "gstatic.com", "googleusercontent.com",
@@ -227,6 +235,15 @@ def _basename_key(url: str):
     return name if len(name) >= 4 else None
 
 
+def _fetch_html(url: str, timeout: int = 12):
+    return requests.get(
+        url,
+        headers={"User-Agent": UA, "Referer": "https://news.google.com/"},
+        timeout=timeout,
+        allow_redirects=True,
+    )
+
+
 def extract_article_images(article_url: str):
     """기사 '본문' 영역의 이미지만 추출 (헤더/로고/광고/관련기사/아이콘 제외).
     실제로 찾은 이미지 수만큼만 반환하고, 개수를 억지로 채우지 않는다."""
@@ -234,96 +251,110 @@ def extract_article_images(article_url: str):
         print("  [이미지] 원문 URL 디코딩이 안 풀려서 이미지 추출을 건너뜀")
         return []
 
-    try:
-        resp = requests.get(
-            article_url,
-            headers={"User-Agent": UA, "Referer": "https://news.google.com/"},
-            timeout=12,
-            allow_redirects=True,
-        )
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+    non_amp_url = _to_non_amp_url(article_url)
+    urls_to_try = [non_amp_url] if non_amp_url != article_url else [article_url]
+    if article_url not in urls_to_try:
+        urls_to_try.append(article_url)  # 일반 URL 시도가 실패하면 원래(AMP) URL로도 재시도
 
-        # og:image는 로고 힌트가 없을 때만 후보로 사용 (영역 제거 전에 미리 확보)
-        images = []
-        og = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
-        if og and og.get("content"):
-            og_url = urllib.parse.urljoin(article_url, og["content"])
-            if not any(w in og_url.lower() for w in LOGO_HINT_WORDS):
-                images.append(og_url)
+    for try_url in urls_to_try:
+        try:
+            resp = _fetch_html(try_url)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-        # 헤더/내비/푸터 + 광고/관련기사/공유 위젯만 정밀하게 제거
-        _remove_non_content_elements(soup)
+            # og:image / twitter:image 는 로고 힌트가 없을 때만 후보로 사용
+            images = []
+            for prop in (
+                ("meta", {"property": "og:image"}),
+                ("meta", {"name": "og:image"}),
+                ("meta", {"name": "twitter:image"}),
+            ):
+                tag_name, attrs = prop
+                meta = soup.find(tag_name, attrs=attrs)
+                if meta and meta.get("content"):
+                    url_ = urllib.parse.urljoin(try_url, meta["content"])
+                    if not any(w in url_.lower() for w in LOGO_HINT_WORDS):
+                        images.append(url_)
 
-        # 본문으로 추정되는 영역만 탐색
-        container = (
-            soup.find("article")
-            or soup.find(attrs={"itemprop": "articleBody"})
-            or soup.find(class_=lambda c: c and (
-                "article" in c or "art_view" in c or "news_view" in c
-                or "articleView" in c or "art_photo" in c or "photo_view" in c
-            ))
-            or soup
-        )
+            # 헤더/내비/푸터 + 광고/관련기사/공유 위젯만 정밀하게 제거
+            _remove_non_content_elements(soup)
 
-        for img in container.find_all("img"):
-            src = img.get("src") or img.get("data-src") or img.get("data-original")
-            if not src:
-                continue
-            src = urllib.parse.urljoin(article_url, src)
-            alt = (img.get("alt") or "").lower()
+            # 본문으로 추정되는 영역만 탐색
+            container = (
+                soup.find("article")
+                or soup.find(attrs={"itemprop": "articleBody"})
+                or soup.find(class_=lambda c: c and (
+                    "article" in c or "art_view" in c or "news_view" in c
+                    or "articleView" in c or "art_photo" in c or "photo_view" in c
+                ))
+                or soup
+            )
 
-            if any(w in src.lower() for w in LOGO_HINT_WORDS) or any(w in alt for w in LOGO_HINT_WORDS):
-                continue
-
-            try:
-                w_ = int(img.get("width", 0) or 0)
-                h_ = int(img.get("height", 0) or 0)
-                if (w_ and w_ < MIN_IMAGE_DIMENSION) or (h_ and h_ < MIN_IMAGE_DIMENSION):
+            # 일반 <img>와 AMP의 <amp-img> 태그 모두 인식
+            for img in container.find_all(["img", "amp-img"]):
+                src = img.get("src") or img.get("data-src") or img.get("data-original") or img.get("srcset")
+                if not src:
                     continue
-            except ValueError:
-                pass
+                src = src.split(",")[0].strip().split(" ")[0]  # srcset 첫 항목만 사용
+                src = urllib.parse.urljoin(try_url, src)
+                alt = (img.get("alt") or "").lower()
 
-            images.append(src)
+                if any(w in src.lower() for w in LOGO_HINT_WORDS) or any(w in alt for w in LOGO_HINT_WORDS):
+                    continue
 
-        print(f"  [이미지-디버그] 필터 전 후보 {len(images)}개: {images}")
+                try:
+                    w_ = int(img.get("width", 0) or 0)
+                    h_ = int(img.get("height", 0) or 0)
+                    if (w_ and w_ < MIN_IMAGE_DIMENSION) or (h_ and h_ < MIN_IMAGE_DIMENSION):
+                        continue
+                except ValueError:
+                    pass
 
-        # 구글/광고 도메인 차단 + data URI 제외
-        # + 1차: 도메인+경로 동일 여부, 2차: 파일명(숫자·확장자 제거) 동일 여부로 중복 제거
-        filtered = []
-        seen_path_keys = set()
-        seen_basenames = set()
-        for src in images:
-            if src.startswith("data:"):
+                images.append(src)
+
+            print(f"  [이미지-디버그] ({try_url}) 필터 전 후보 {len(images)}개: {images}")
+
+            if not images:
+                continue  # 이 URL에서는 못 찾았으니 다음 후보 URL로 재시도
+
+            # 구글/광고 도메인 차단 + data URI 제외
+            # + 1차: 도메인+경로 동일 여부, 2차: 파일명(숫자·확장자 제거) 동일 여부로 중복 제거
+            filtered = []
+            seen_path_keys = set()
+            seen_basenames = set()
+            for src in images:
+                if src.startswith("data:"):
+                    continue
+                if any(d in src for d in BLOCKED_IMAGE_DOMAINS):
+                    continue
+
+                pkey = _path_key(src)
+                if pkey in seen_path_keys:
+                    continue
+
+                bkey = _basename_key(src)
+                if bkey and bkey in seen_basenames:
+                    continue
+
+                seen_path_keys.add(pkey)
+                if bkey:
+                    seen_basenames.add(bkey)
+                filtered.append(src)
+
+            if not filtered:
+                print(f"  [이미지] 이미지 태그 {len(images)}개 발견했지만 필터 후 0개")
                 continue
-            if any(d in src for d in BLOCKED_IMAGE_DOMAINS):
-                continue
 
-            pkey = _path_key(src)
-            if pkey in seen_path_keys:
-                continue
-
-            bkey = _basename_key(src)
-            if bkey and bkey in seen_basenames:
-                continue
-
-            seen_path_keys.add(pkey)
-            if bkey:
-                seen_basenames.add(bkey)
-            filtered.append(src)
-
-        if not filtered:
-            print(f"  [이미지] 이미지 태그 {len(images)}개 발견했지만 필터 후 0개")
-        else:
             for u in filtered:
                 print(f"  [이미지] 채택: {u}")
 
-        # 실제로 찾은 만큼만 반환 (최대 MAX_IMAGES_PER_POST장, 억지로 채우지 않음)
-        return filtered[: cfg.MAX_IMAGES_PER_POST]
+            return filtered[: cfg.MAX_IMAGES_PER_POST]
 
-    except Exception as e:
-        print(f"  [이미지] 추출 실패 ({article_url}): {e}")
-        return []
+        except Exception as e:
+            print(f"  [이미지] 추출 실패 ({try_url}): {e}")
+            continue
+
+    return []
 
 
 # ────────────────────────────────────────────────────────────
