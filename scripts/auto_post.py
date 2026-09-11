@@ -224,13 +224,16 @@ def _path_key(url: str):
 
 
 def _basename_key(url: str):
-    """2차 중복판정: 파일명만 보고 숫자(크기·타임스탬프)와 확장자를 제거해 비교.
-    도메인이 다르거나 경로 구조가 달라도 같은 사진(다른 크기 버전)이면 잡아낸다.
+    """2차 중복판정: 파일명 끝의 '크기 버전' 표시(_v150, _thumb 등)만 정확히 떼어내고
+    나머지 핵심 ID는 그대로 비교한다. (전체 숫자를 지우면 핵심 ID까지 사라져서
+    서로 다른 표기의 같은 사진을 오히려 못 잡게 되므로, 숫자 전체 제거는 하지 않는다)
+    도메인이나 폴더(thumbnail/photo)가 달라도 핵심 ID가 같으면 같은 사진으로 본다.
     짧은 키(4자 미만)는 오탐 위험이 커서 중복판정에 쓰지 않는다."""
     parsed = urllib.parse.urlsplit(url)
     name = parsed.path.rsplit("/", 1)[-1].lower()
     name = re.sub(r"\.(jpg|jpeg|png|gif|webp|bmp)$", "", name)
-    name = re.sub(r"[0-9]+", "", name)
+    # 끝에 붙는 크기/버전 표시만 제거: _v150, _thumb, _small, _m, _xl 등
+    name = re.sub(r"[_\-](v\d{2,4}|thumb(nail)?|small|medium|large|xs|s|m|l|xl)$", "", name)
     name = re.sub(r"[_\-\.]+", "", name)
     return name if len(name) >= 4 else None
 
