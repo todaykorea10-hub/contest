@@ -8,11 +8,10 @@
   3) 후보 기사 중 MAX_POSTS_PER_RUN개를 골라 Gemini로 블로그 글 재작성
      (본문 + 핵심 키워드(태그)까지 함께 생성)
   4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤 (AMP 페이지면
-     일반 페이지 URL로 우선 변환), 헤더/광고/관련기사 영역을 제외한 본문에서만
-     이미지를 추출 (일반 <img>와 AMP의 <amp-img> 모두 인식,
-     실제로 찾은 만큼만 사용, 억지로 개수를 채우지 않음.
-     같은 사진의 다른 크기/도메인 URL까지 파일명 기반으로 2차 중복 판정),
-     상단/중간/하단에 분산 배치
+     일반 페이지 URL로 우선 변환), 헤더/광고/관련기사 영역을 제외한 본문에서
+     이미지 후보들을 모으고, 실제로 다운로드해서 픽셀 크기를 비교한 뒤
+     가장 큰 이미지 1장만 사용 (같은 사진의 다른 크기 버전이 여러 개
+     섞여 있어도 결과적으로 1장만 남으므로 중복 표시 문제가 생기지 않음)
   5) Blogger API로 게시 (라벨 = 공통 라벨 + 주제 + 본문 키워드, 본문 하단에 해시태그),
      각 게시 사이에 무작위 대기 (스팸 방지)
 
@@ -27,9 +26,11 @@ import random
 import difflib
 import urllib.parse
 import xml.etree.ElementTree as ET
+from io import BytesIO
 
 import requests
 from bs4 import BeautifulSoup
+from PIL import Image
 from googlenewsdecoder import new_decoderv1
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -147,7 +148,7 @@ def is_duplicate(title: str, existing_titles) -> bool:
 
 
 # ────────────────────────────────────────────────────────────
-# 원문 기사 URL 디코딩 + 이미지 추출
+# 원문 기사 URL 디코딩 + 대표 이미지(가장 큰 것 1장) 추출
 # ────────────────────────────────────────────────────────────
 def resolve_real_url(google_news_link: str) -> str:
     """Google News RSS 링크를 실제 언론사 기사 URL로 변환 (googlenewsdecoder 사용)"""
@@ -162,8 +163,7 @@ def resolve_real_url(google_news_link: str) -> str:
 
 
 def _to_non_amp_url(url: str) -> str:
-    """AMP 전용 페이지(articleViewAmp.html 등)는 메타태그가 부실하거나
-    <amp-img> 태그를 써서 이미지 추출이 잘 안 되는 경우가 많다.
+    """AMP 전용 페이지(articleViewAmp.html 등)는 메타태그가 부실한 경우가 많아
     가능하면 일반 페이지 URL로 바꿔서 먼저 시도한다."""
     return re.sub(r"(?i)ArticleViewAmp\.html", "ArticleView.html", url)
 
@@ -188,7 +188,9 @@ LONG_SUBSTRING_HINTS = (
 # '_' '-' 로 나눈 토큰이 정확히 일치할 때만 걸러낸다.
 SHORT_EXACT_HINTS = {"ad", "ads", "nav", "sns", "gnb", "lnb", "share"}
 
-MIN_IMAGE_DIMENSION = 150  # px, 명시적으로 이보다 작은 width/height는 아이콘류로 간주
+MIN_IMAGE_PIXELS = 200          # 가로/세로 중 작은 쪽이 이보다 작으면 아이콘류로 간주
+MAX_IMAGE_CANDIDATES = 8        # 실제 다운로드해서 크기를 확인할 후보 수 상한 (과도한 요청 방지)
+MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024  # 이미지 하나당 최대 5MB까지만 내려받아 크기 확인
 
 
 def _is_non_content_tag(tag) -> bool:
@@ -216,28 +218,6 @@ def _remove_non_content_elements(scope):
         tag.decompose()
 
 
-def _path_key(url: str):
-    """1차 중복판정: 도메인+경로 (쿼리스트링/크기 폴더명 무시)"""
-    parsed = urllib.parse.urlsplit(url)
-    path = re.sub(r"/(thumb|thumbnail|small|medium|large|resize)[-_/]", "/", parsed.path.lower())
-    return (parsed.netloc.lower(), path)
-
-
-def _basename_key(url: str):
-    """2차 중복판정: 파일명 끝의 '크기 버전' 표시(_v150, _thumb 등)만 정확히 떼어내고
-    나머지 핵심 ID는 그대로 비교한다. (전체 숫자를 지우면 핵심 ID까지 사라져서
-    서로 다른 표기의 같은 사진을 오히려 못 잡게 되므로, 숫자 전체 제거는 하지 않는다)
-    도메인이나 폴더(thumbnail/photo)가 달라도 핵심 ID가 같으면 같은 사진으로 본다.
-    짧은 키(4자 미만)는 오탐 위험이 커서 중복판정에 쓰지 않는다."""
-    parsed = urllib.parse.urlsplit(url)
-    name = parsed.path.rsplit("/", 1)[-1].lower()
-    name = re.sub(r"\.(jpg|jpeg|png|gif|webp|bmp)$", "", name)
-    # 끝에 붙는 크기/버전 표시만 제거: _v150, _thumb, _small, _m, _xl 등
-    name = re.sub(r"[_\-](v\d{2,4}|thumb(nail)?|small|medium|large|xs|s|m|l|xl)$", "", name)
-    name = re.sub(r"[_\-\.]+", "", name)
-    return name if len(name) >= 4 else None
-
-
 def _fetch_html(url: str, timeout: int = 12):
     return requests.get(
         url,
@@ -247,17 +227,13 @@ def _fetch_html(url: str, timeout: int = 12):
     )
 
 
-def extract_article_images(article_url: str):
-    """기사 '본문' 영역의 이미지만 추출 (헤더/로고/광고/관련기사/아이콘 제외).
-    실제로 찾은 이미지 수만큼만 반환하고, 개수를 억지로 채우지 않는다."""
-    if "news.google.com" in article_url:
-        print("  [이미지] 원문 URL 디코딩이 안 풀려서 이미지 추출을 건너뜀")
-        return []
-
+def _collect_candidate_image_urls(article_url: str):
+    """og:image/twitter:image + 본문(<img>, <amp-img>) 영역에서 이미지 후보 URL을 모은다.
+    (아직 크기 비교는 하지 않음 - 실제 다운로드는 별도 단계에서 수행)"""
     non_amp_url = _to_non_amp_url(article_url)
-    urls_to_try = [non_amp_url] if non_amp_url != article_url else [article_url]
-    if article_url not in urls_to_try:
-        urls_to_try.append(article_url)  # 일반 URL 시도가 실패하면 원래(AMP) URL로도 재시도
+    urls_to_try = [non_amp_url]
+    if non_amp_url != article_url:
+        urls_to_try.append(article_url)
 
     for try_url in urls_to_try:
         try:
@@ -265,24 +241,20 @@ def extract_article_images(article_url: str):
             resp.raise_for_status()
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # og:image / twitter:image 는 로고 힌트가 없을 때만 후보로 사용
             images = []
-            for prop in (
+            for tag_name, attrs in (
                 ("meta", {"property": "og:image"}),
                 ("meta", {"name": "og:image"}),
                 ("meta", {"name": "twitter:image"}),
             ):
-                tag_name, attrs = prop
                 meta = soup.find(tag_name, attrs=attrs)
                 if meta and meta.get("content"):
                     url_ = urllib.parse.urljoin(try_url, meta["content"])
                     if not any(w in url_.lower() for w in LOGO_HINT_WORDS):
                         images.append(url_)
 
-            # 헤더/내비/푸터 + 광고/관련기사/공유 위젯만 정밀하게 제거
             _remove_non_content_elements(soup)
 
-            # 본문으로 추정되는 영역만 탐색
             container = (
                 soup.find("article")
                 or soup.find(attrs={"itemprop": "articleBody"})
@@ -293,7 +265,6 @@ def extract_article_images(article_url: str):
                 or soup
             )
 
-            # 일반 <img>와 AMP의 <amp-img> 태그 모두 인식
             for img in container.find_all(["img", "amp-img"]):
                 src = img.get("src") or img.get("data-src") or img.get("data-original") or img.get("srcset")
                 if not src:
@@ -304,60 +275,88 @@ def extract_article_images(article_url: str):
 
                 if any(w in src.lower() for w in LOGO_HINT_WORDS) or any(w in alt for w in LOGO_HINT_WORDS):
                     continue
-
-                try:
-                    w_ = int(img.get("width", 0) or 0)
-                    h_ = int(img.get("height", 0) or 0)
-                    if (w_ and w_ < MIN_IMAGE_DIMENSION) or (h_ and h_ < MIN_IMAGE_DIMENSION):
-                        continue
-                except ValueError:
-                    pass
-
                 images.append(src)
 
-            print(f"  [이미지-디버그] ({try_url}) 필터 전 후보 {len(images)}개: {images}")
-
-            if not images:
-                continue  # 이 URL에서는 못 찾았으니 다음 후보 URL로 재시도
-
-            # 구글/광고 도메인 차단 + data URI 제외
-            # + 1차: 도메인+경로 동일 여부, 2차: 파일명(숫자·확장자 제거) 동일 여부로 중복 제거
-            filtered = []
-            seen_path_keys = set()
-            seen_basenames = set()
-            for src in images:
-                if src.startswith("data:"):
-                    continue
-                if any(d in src for d in BLOCKED_IMAGE_DOMAINS):
-                    continue
-
-                pkey = _path_key(src)
-                if pkey in seen_path_keys:
-                    continue
-
-                bkey = _basename_key(src)
-                if bkey and bkey in seen_basenames:
-                    continue
-
-                seen_path_keys.add(pkey)
-                if bkey:
-                    seen_basenames.add(bkey)
-                filtered.append(src)
-
-            if not filtered:
-                print(f"  [이미지] 이미지 태그 {len(images)}개 발견했지만 필터 후 0개")
-                continue
-
-            for u in filtered:
-                print(f"  [이미지] 채택: {u}")
-
-            return filtered[: cfg.MAX_IMAGES_PER_POST]
+            # 이 URL에서 뭔가 찾았으면 여기서 종료, 없으면 다음 후보 URL(AMP 등)로 재시도
+            if images:
+                # 도메인 차단 + data URI 제외 + 문자열 그대로 중복 제거 (다운로드 낭비 방지)
+                seen = set()
+                cleaned = []
+                for src in images:
+                    if src.startswith("data:"):
+                        continue
+                    if any(d in src for d in BLOCKED_IMAGE_DOMAINS):
+                        continue
+                    if src in seen:
+                        continue
+                    seen.add(src)
+                    cleaned.append(src)
+                if cleaned:
+                    return cleaned[:MAX_IMAGE_CANDIDATES]
 
         except Exception as e:
-            print(f"  [이미지] 추출 실패 ({try_url}): {e}")
+            print(f"  [이미지] 후보 수집 실패 ({try_url}): {e}")
             continue
 
     return []
+
+
+def _get_image_pixel_size(url: str):
+    """이미지를 실제로 내려받아 (width, height) 픽셀 크기를 확인. 실패 시 None."""
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": UA, "Referer": "https://news.google.com/"},
+            timeout=10,
+            stream=True,
+        )
+        resp.raise_for_status()
+        data = bytearray()
+        for chunk in resp.iter_content(16384):
+            data += chunk
+            if len(data) > MAX_DOWNLOAD_BYTES:
+                break
+        img = Image.open(BytesIO(bytes(data)))
+        return img.size  # (width, height)
+    except Exception as e:
+        print(f"  [이미지] 크기 확인 실패 ({url}): {e}")
+        return None
+
+
+def extract_article_images(article_url: str):
+    """후보 이미지들을 모아 실제로 다운로드해 픽셀 크기를 비교한 뒤,
+    가장 큰 이미지 1장만 반환한다 (없으면 빈 리스트)."""
+    if "news.google.com" in article_url:
+        print("  [이미지] 원문 URL 디코딩이 안 풀려서 이미지 추출을 건너뜀")
+        return []
+
+    candidates = _collect_candidate_image_urls(article_url)
+    print(f"  [이미지-디버그] 크기 확인할 후보 {len(candidates)}개: {candidates}")
+
+    if not candidates:
+        return []
+
+    best_url = None
+    best_area = 0
+    for url in candidates:
+        size = _get_image_pixel_size(url)
+        if not size:
+            continue
+        w, h = size
+        print(f"  [이미지-디버그] {url} -> {w}x{h}")
+        if min(w, h) < MIN_IMAGE_PIXELS:
+            continue  # 아이콘/로고류로 간주하고 제외
+        area = w * h
+        if area > best_area:
+            best_area = area
+            best_url = url
+
+    if not best_url:
+        print("  [이미지] 크기 확인 가능한 이미지가 없어 이미지 없이 게시")
+        return []
+
+    print(f"  [이미지] 채택(최대 크기): {best_url}")
+    return [best_url]
 
 
 # ────────────────────────────────────────────────────────────
@@ -416,45 +415,15 @@ TAGS: <본문 핵심 키워드 8~10개, 쉼표로 구분, 공백 없이 한 단�
     return title, body, tags
 
 
-def insert_images_into_body(body_html: str, image_urls):
-    """이미지를 본문 안에 상단/중간/하단으로 분산 배치.
-    1장이면 상단에만, 2장이면 상단+하단, 3장이면 상단+중간+하단."""
-    if not image_urls:
-        return body_html
-
-    img_tags = [
-        f'<img src="{url}" referrerpolicy="no-referrer" '
-        f'style="width:100%;height:auto;margin:14px 0;" alt="관련 이미지"/>'
-        for url in image_urls
-    ]
-
-    if len(img_tags) == 1:
-        return img_tags[0] + "\n" + body_html
-
-    blocks = [b for b in body_html.split("\n") if b.strip()]
-    n = len(img_tags)
-
-    if len(blocks) < n:
-        return img_tags[0] + "\n" + body_html + "\n" + "\n".join(img_tags[1:])
-
-    positions = [max(1, round((i + 1) * len(blocks) / (n + 1))) for i in range(n)]
-
-    result = []
-    img_idx = 0
-    for i, block in enumerate(blocks):
-        if img_idx < n and i == positions[img_idx]:
-            result.append(img_tags[img_idx])
-            img_idx += 1
-        result.append(block)
-    while img_idx < n:
-        result.append(img_tags[img_idx])
-        img_idx += 1
-
-    return "\n".join(result)
-
-
 def build_html(body_html: str, image_urls, source_link: str, tags):
-    parts = [insert_images_into_body(body_html, image_urls)]
+    """image_urls는 이제 0개 또는 1개(가장 큰 이미지)만 들어온다."""
+    parts = []
+    if image_urls:
+        parts.append(
+            f'<img src="{image_urls[0]}" referrerpolicy="no-referrer" '
+            f'style="width:100%;height:auto;margin-bottom:8px;" alt="관련 이미지"/>'
+        )
+    parts.append(body_html)
 
     if tags:
         hashtags = " ".join(f"#{t.replace(' ', '')}" for t in tags[:10])
@@ -520,7 +489,7 @@ def main():
                 continue
 
             image_urls = extract_article_images(real_url)
-            print(f"  -> 이미지 {len(image_urls)}장 추출")
+            print(f"  -> 이미지 {len(image_urls)}장 사용")
             html_content = build_html(body, image_urls, real_url, tags)
             labels = cfg.labels_for(article["topic_key"], tags)
 
