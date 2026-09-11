@@ -17,7 +17,6 @@ import sys
 import time
 import random
 import difflib
-import re
 import urllib.parse
 import xml.etree.ElementTree as ET
 
@@ -27,6 +26,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from google import genai
+from googlenewsdecoder import new_decoderv1
 
 sys.path.append(os.path.dirname(__file__))
 import config_base as cfg
@@ -144,14 +144,11 @@ def is_duplicate(title: str, existing_titles) -> bool:
 def resolve_real_url(google_news_link: str) -> str:
     """Google News RSS 링크를 실제 언론사 기사 URL로 변환"""
     try:
-        resp = requests.get(google_news_link, headers={"User-Agent": UA}, timeout=10, allow_redirects=True)
-        if "news.google.com" not in resp.url:
-            return resp.url
-        m = re.search(r'<meta\s+http-equiv=["\']refresh["\']\s+content=["\']\d+;\s*url=([^"\']+)["\']', resp.text, re.I)
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
+        result = new_decoderv1(google_news_link, interval=2)
+        if result.get("status") and result.get("decoded_url"):
+            return result["decoded_url"]
+    except Exception as e:
+        print(f"[정보] 뉴스 링크 디코딩 실패: {e}")
     return google_news_link  # 실패 시 원래 링크 그대로 사용
 
 
