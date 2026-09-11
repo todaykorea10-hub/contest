@@ -17,10 +17,9 @@ import sys
 import time
 import random
 import difflib
+import re
 import urllib.parse
 import xml.etree.ElementTree as ET
-
-import re
 
 import requests
 from bs4 import BeautifulSoup
@@ -103,15 +102,27 @@ def fetch_news(keyword: str, days: int = None):
 
 
 def collect_candidates():
+    """검색 키워드가 여러 개라 같은 기사가 중복 수집될 수 있으므로,
+    원문 링크(link) 기준으로 한 번만 후보에 넣는다."""
     candidates = []
+    seen_links = set()
+
     for kw in cfg.CONTEST_KEYWORDS:
         for a in fetch_news(kw):
+            if a["link"] in seen_links:
+                continue
+            seen_links.add(a["link"])
             a["topic_key"] = "contest"
             candidates.append(a)
+
     for kw in cfg.FESTIVAL_KEYWORDS:
         for a in fetch_news(kw):
+            if a["link"] in seen_links:
+                continue
+            seen_links.add(a["link"])
             a["topic_key"] = "festival"
             candidates.append(a)
+
     random.shuffle(candidates)
     return candidates
 
@@ -130,7 +141,6 @@ def is_duplicate(title: str, existing_titles) -> bool:
 # ────────────────────────────────────────────────────────────
 # 원문 기사 대표 이미지 추출
 # ────────────────────────────────────────────────────────────
-
 def resolve_real_url(google_news_link: str) -> str:
     """Google News RSS 링크를 실제 언론사 기사 URL로 변환"""
     try:
@@ -143,15 +153,21 @@ def resolve_real_url(google_news_link: str) -> str:
     except Exception:
         pass
     return google_news_link  # 실패 시 원래 링크 그대로 사용
-  
+
+
 def extract_og_image(article_url: str):
+    # 구글 뉴스 리다이렉트가 안 풀린 상태면 이미지 추출을 시도하지 않음
+    # (news.google.com 자체 페이지의 로고/썸네일이 잡히는 걸 방지)
+    if "news.google.com" in article_url:
+        return None
+
     try:
         resp = requests.get(article_url, headers={"User-Agent": UA}, timeout=10, allow_redirects=True)
         soup = BeautifulSoup(resp.text, "html.parser")
         tag = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
         if tag and tag.get("content"):
             img_url = tag["content"]
-            if "google.com" in img_url or "gstatic.com" in img_url:
+            if any(d in img_url for d in ("google.com", "gstatic.com", "googleusercontent.com")):
                 return None  # 구글 자체 로고/썸네일은 사용하지 않음
             return img_url
     except Exception as e:
@@ -239,13 +255,14 @@ def main():
 
     print("[3/4] 뉴스 수집 중 (공모전/축제)...")
     candidates = collect_candidates()
-    print(f"  -> 후보 기사 {len(candidates)}건 수집")
+    print(f"  -> 후보 기사 {len(candidates)}건 수집 (링크 기준 중복 제거됨)")
 
     gemini_client = genai.Client(api_key=secrets["GEMINI_API_KEY"])
 
     posted = 0
     attempts = 0
     posted_titles_this_run = []
+    seen_links_this_run = set()
 
     for article in candidates:
         if posted >= cfg.MAX_POSTS_PER_RUN:
@@ -253,6 +270,11 @@ def main():
         if attempts >= cfg.MAX_ATTEMPTS_PER_RUN:
             print("  -> 최대 시도 횟수에 도달해 이번 실행을 종료합니다")
             break
+
+        # 이번 실행 내에서 같은 원문 링크가 또 나오면 건너뜀 (이중 안전장치)
+        if article["link"] in seen_links_this_run:
+            continue
+        seen_links_this_run.add(article["link"])
 
         if is_duplicate(article["title"], existing_titles + posted_titles_this_run):
             continue
