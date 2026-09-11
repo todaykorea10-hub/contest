@@ -18,6 +18,7 @@ GitHub Actions에서 스케줄 실행되며, 별도의 로컬 상태 파일 없�
 Blogger에 이미 올라간 글 목록을 기준으로 중복을 판단하므로 무상태(stateless)로 동작한다.
 """
 import os
+import re
 import sys
 import time
 import random
@@ -166,28 +167,44 @@ BLOCKED_IMAGE_DOMAINS = (
 )
 # 언론사 로고/워터마크로 추정되는 힌트 (파일명·alt 속성에 이 단어가 있으면 제외)
 LOGO_HINT_WORDS = ("logo", "로고", "symbol", "ci_", "_ci.", "watermark", "masthead")
-# 헤더/내비/푸터 등 로고·배너가 위치하는 영역의 클래스·id 힌트
-CHROME_CLASS_HINTS = ("header", "gnb", "footer", "sidebar", "lnb", "topbar", "navbar", "nav_")
-# 광고/관련기사/공유 위젯 등 본문이 아닌 영역의 클래스·id 힌트
-NON_CONTENT_HINTS = (
-    "ad", "banner", "relate", "recommend", "outbrain", "taboola",
-    "widget", "promotion", "sponsor", "share", "sns_", "reporter",
-    "byline", "copyright", "comment", "popular", "ranking",
+
+# 길고 특이해서 부분 문자열로 걸러도 안전한 힌트 (오탐 위험이 낮음)
+LONG_SUBSTRING_HINTS = (
+    "header", "footer", "sidebar", "topbar", "navbar",
+    "banner", "relate", "recommend", "outbrain", "taboola",
+    "widget", "promotion", "sponsor", "reporter", "byline",
+    "copyright", "comment", "popular", "ranking",
 )
+# 짧고 흔해서 부분 문자열로 걸면 header/read/already 등을 오탐하는 힌트.
+# '_' '-' 로 나눈 토큰이 정확히 일치할 때만 걸러낸다.
+SHORT_EXACT_HINTS = {"ad", "ads", "nav", "sns", "gnb", "lnb", "share"}
+
 MIN_IMAGE_DIMENSION = 150  # px, 명시적으로 이보다 작은 width/height는 아이콘류로 간주
 
 
+def _is_non_content_tag(tag) -> bool:
+    """클래스/id를 보고 헤더·광고·관련기사 등 본문이 아닌 영역인지 정밀하게 판단.
+    'ad'처럼 짧은 단어는 토큰이 정확히 일치할 때만, 길고 특이한 단어만 부분 문자열로 검사한다."""
+    raw_values = list(tag.get("class") or [])
+    if tag.get("id"):
+        raw_values.append(tag["id"])
+
+    for raw in raw_values:
+        low = raw.lower()
+        if any(h in low for h in LONG_SUBSTRING_HINTS):
+            return True
+        tokens = re.split(r"[_\-]+", low)
+        if any(t in SHORT_EXACT_HINTS for t in tokens):
+            return True
+    return False
+
+
 def _remove_non_content_elements(scope):
-    """헤더/내비/푸터 + 광고·관련기사·공유 위젯 등을 통째로 제거"""
+    """헤더/내비/푸터 태그 + 광고·관련기사·공유 위젯 등을 통째로 제거"""
     for tag in scope.find_all(["header", "nav", "footer", "aside"]):
         tag.decompose()
-    for tag in scope.find_all(class_=lambda c: c and any(h in c.lower() for h in CHROME_CLASS_HINTS)):
+    for tag in scope.find_all(_is_non_content_tag):
         tag.decompose()
-    for tag in scope.find_all(True):
-        cls = " ".join(tag.get("class", [])).lower()
-        tid = (tag.get("id") or "").lower()
-        if any(h in cls or h in tid for h in NON_CONTENT_HINTS):
-            tag.decompose()
 
 
 def extract_article_images(article_url: str):
@@ -207,7 +224,7 @@ def extract_article_images(article_url: str):
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # og:image는 로고 힌트가 없을 때만 후보로 사용 (제거 전에 미리 확보)
+        # og:image는 로고 힌트가 없을 때만 후보로 사용 (영역 제거 전에 미리 확보)
         images = []
         og = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
         if og and og.get("content"):
@@ -215,7 +232,7 @@ def extract_article_images(article_url: str):
             if not any(w in og_url.lower() for w in LOGO_HINT_WORDS):
                 images.append(og_url)
 
-        # 헤더/내비/푸터 + 광고/관련기사/공유 위젯 제거
+        # 헤더/내비/푸터 + 광고/관련기사/공유 위젯만 정밀하게 제거
         _remove_non_content_elements(soup)
 
         # 본문으로 추정되는 영역만 탐색
@@ -344,12 +361,10 @@ def insert_images_into_body(body_html: str, image_urls):
     if len(img_tags) == 1:
         return img_tags[0] + "\n" + body_html
 
-    # 본문을 줄 단위 블록으로 나눠서, 이미지 개수+1 구간으로 균등 분배
     blocks = [b for b in body_html.split("\n") if b.strip()]
     n = len(img_tags)
 
     if len(blocks) < n:
-        # 블록이 이미지 수보다 적으면 맨 앞/뒤로만 배치
         return img_tags[0] + "\n" + body_html + "\n" + "\n".join(img_tags[1:])
 
     positions = [max(1, round((i + 1) * len(blocks) / (n + 1))) for i in range(n)]
