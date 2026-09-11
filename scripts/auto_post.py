@@ -10,7 +10,7 @@
   4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤,
      헤더/광고/관련기사 영역을 제외한 본문에서만 이미지를 추출
      (실제로 찾은 만큼만 사용, 억지로 개수를 채우지 않음. 같은 사진의
-      다른 크기 URL도 도메인+경로 기준으로 중복 판정),
+      다른 크기/도메인 URL까지 파일명 기반으로 2차 중복 판정),
      상단/중간/하단에 분산 배치
   5) Blogger API로 게시 (라벨 = 공통 라벨 + 주제 + 본문 키워드, 본문 하단에 해시태그),
      각 게시 사이에 무작위 대기 (스팸 방지)
@@ -208,12 +208,23 @@ def _remove_non_content_elements(scope):
         tag.decompose()
 
 
-def _image_identity_key(url: str):
-    """같은 사진을 크기·캐시 파라미터만 다르게 내보내는 경우까지 잡기 위해,
-    쿼리스트링을 무시하고 도메인+경로만으로 동일 이미지 여부를 판단한다."""
+def _path_key(url: str):
+    """1차 중복판정: 도메인+경로 (쿼리스트링/크기 폴더명 무시)"""
     parsed = urllib.parse.urlsplit(url)
     path = re.sub(r"/(thumb|thumbnail|small|medium|large|resize)[-_/]", "/", parsed.path.lower())
     return (parsed.netloc.lower(), path)
+
+
+def _basename_key(url: str):
+    """2차 중복판정: 파일명만 보고 숫자(크기·타임스탬프)와 확장자를 제거해 비교.
+    도메인이 다르거나 경로 구조가 달라도 같은 사진(다른 크기 버전)이면 잡아낸다.
+    짧은 키(4자 미만)는 오탐 위험이 커서 중복판정에 쓰지 않는다."""
+    parsed = urllib.parse.urlsplit(url)
+    name = parsed.path.rsplit("/", 1)[-1].lower()
+    name = re.sub(r"\.(jpg|jpeg|png|gif|webp|bmp)$", "", name)
+    name = re.sub(r"[0-9]+", "", name)
+    name = re.sub(r"[_\-\.]+", "", name)
+    return name if len(name) >= 4 else None
 
 
 def extract_article_images(article_url: str):
@@ -275,22 +286,37 @@ def extract_article_images(article_url: str):
 
             images.append(src)
 
-        # 구글/광고 도메인 차단 + data URI 제외 + 동일 사진(크기만 다른 URL 포함) 중복 제거
+        print(f"  [이미지-디버그] 필터 전 후보 {len(images)}개: {images}")
+
+        # 구글/광고 도메인 차단 + data URI 제외
+        # + 1차: 도메인+경로 동일 여부, 2차: 파일명(숫자·확장자 제거) 동일 여부로 중복 제거
         filtered = []
-        seen_keys = set()
+        seen_path_keys = set()
+        seen_basenames = set()
         for src in images:
             if src.startswith("data:"):
                 continue
             if any(d in src for d in BLOCKED_IMAGE_DOMAINS):
                 continue
-            key = _image_identity_key(src)
-            if key in seen_keys:
+
+            pkey = _path_key(src)
+            if pkey in seen_path_keys:
                 continue
-            seen_keys.add(key)
+
+            bkey = _basename_key(src)
+            if bkey and bkey in seen_basenames:
+                continue
+
+            seen_path_keys.add(pkey)
+            if bkey:
+                seen_basenames.add(bkey)
             filtered.append(src)
 
         if not filtered:
             print(f"  [이미지] 이미지 태그 {len(images)}개 발견했지만 필터 후 0개")
+        else:
+            for u in filtered:
+                print(f"  [이미지] 채택: {u}")
 
         # 실제로 찾은 만큼만 반환 (최대 MAX_IMAGES_PER_POST장, 억지로 채우지 않음)
         return filtered[: cfg.MAX_IMAGES_PER_POST]
