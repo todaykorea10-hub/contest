@@ -150,59 +150,90 @@ def resolve_real_url(google_news_link: str) -> str:
         result = new_decoderv1(google_news_link, interval=2)
         if result.get("status") and result.get("decoded_url"):
             return result["decoded_url"]
+        print(f"[정보] 뉴스 링크 디코딩 실패(status=False): {result.get('message')}")
     except Exception as e:
         print(f"[정보] 뉴스 링크 디코딩 실패: {e}")
     return google_news_link  # 실패 시 원래 링크 그대로 사용
 
 
+# 파일명 키워드(banner, ad 등)로 거르면 실제 기사 사진까지 오탐으로 걸러지는 경우가 많아서,
+# 도메인(구글/광고 네트워크)과 이미지 크기(아이콘 추정)만으로 판단한다.
+BLOCKED_IMAGE_DOMAINS = (
+    "google.com", "gstatic.com", "googleusercontent.com",
+    "doubleclick.net", "googlesyndication.com", "adservice.google",
+    "facebook.com", "fbcdn.net",
+)
+MIN_IMAGE_DIMENSION = 150  # px, 이보다 작은 명시적 width/height는 아이콘류로 간주
+
+
 def extract_article_images(article_url: str):
-    """본문 안의 이미지들을 여러 장 추출 (광고/아이콘/구글 자체 이미지는 제외)"""
+    """본문 안의 이미지들을 여러 장 추출 (구글/광고 도메인, 소형 아이콘만 제외)"""
     if "news.google.com" in article_url:
+        print("  [이미지] 원문 URL 디코딩이 안 풀려서 이미지 추출을 건너뜀")
         return []
 
     images = []
     try:
-        resp = requests.get(article_url, headers={"User-Agent": UA}, timeout=10, allow_redirects=True)
+        resp = requests.get(
+            article_url,
+            headers={"User-Agent": UA, "Referer": "https://news.google.com/"},
+            timeout=12,
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
         # 1) og:image를 우선 후보로
         og = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
         if og and og.get("content"):
-            images.append(og["content"])
+            images.append(urllib.parse.urljoin(article_url, og["content"]))
 
         # 2) 본문으로 추정되는 영역의 <img> 태그들도 후보에 추가
         container = (
             soup.find("article")
             or soup.find(attrs={"itemprop": "articleBody"})
-            or soup.find("div", class_=lambda c: c and ("article" in c or "content" in c or "view" in c))
+            or soup.find("div", class_=lambda c: c and (
+                "article" in c or "art_view" in c or "news_view" in c or "articleView" in c
+            ))
             or soup
         )
         for img in container.find_all("img"):
-            src = img.get("src") or img.get("data-src")
+            src = img.get("src") or img.get("data-src") or img.get("data-original")
             if not src:
                 continue
             src = urllib.parse.urljoin(article_url, src)
+
+            # 명시적으로 작은 크기가 지정된 이미지는 아이콘/로고로 간주하고 제외
+            try:
+                w = int(img.get("width", 0) or 0)
+                h = int(img.get("height", 0) or 0)
+                if (w and w < MIN_IMAGE_DIMENSION) or (h and h < MIN_IMAGE_DIMENSION):
+                    continue
+            except ValueError:
+                pass
+
             images.append(src)
 
-        # 3) 필터링: 구글/광고/아이콘성 이미지, data URI 제외 + 중복 제거
-        blocked = ("google.com", "gstatic.com", "googleusercontent.com",
-                   "logo", "icon", "sprite", "button", "banner", "ad.", "ads.")
+        # 3) 구글/광고 도메인만 명확히 차단 + data URI 제외 + 중복 제거
         filtered = []
         seen = set()
         for src in images:
             if src.startswith("data:"):
                 continue
-            if any(b in src.lower() for b in blocked):
+            if any(d in src for d in BLOCKED_IMAGE_DOMAINS):
                 continue
             if src in seen:
                 continue
             seen.add(src)
             filtered.append(src)
 
+        if not filtered:
+            print(f"  [이미지] 이미지 태그 {len(images)}개 발견했지만 필터 후 0개 (og:image 없음/전부 소형 이미지)")
+
         return filtered[: cfg.MAX_IMAGES_PER_POST]
 
     except Exception as e:
-        print(f"[정보] 이미지 추출 실패: {e}")
+        print(f"  [이미지] 추출 실패 ({article_url}): {e}")
         return []
 
 
@@ -326,6 +357,7 @@ def main():
         print(f"[4/4] 작성 중: {article['title']}")
         try:
             real_url = resolve_real_url(article["link"])
+            print(f"  -> 원문 URL: {real_url}")
 
             title, body, tags = generate_post(gemini_client, article, article["topic_key"])
 
@@ -334,11 +366,12 @@ def main():
                 continue
 
             image_urls = extract_article_images(real_url)
+            print(f"  -> 이미지 {len(image_urls)}장 추출")
             html_content = build_html(body, image_urls, real_url, tags)
             labels = cfg.labels_for(article["topic_key"], tags)
 
             result = publish_post(service, blog_id, title, html_content, labels)
-            print(f"  -> 게시 완료: {result.get('url')} (이미지 {len(image_urls)}장)")
+            print(f"  -> 게시 완료: {result.get('url')}")
 
             posted += 1
             posted_titles_this_run.append(title)
