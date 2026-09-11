@@ -17,6 +17,7 @@ CONTEST_KEYWORDS = [
     "글쓰기 공모전",
     "정부 공모전",
     "기업 공모전",
+    "모집",
 ]
 
 FESTIVAL_KEYWORDS = [
@@ -65,5 +66,5 @@ WRITING_ANGLES = [
 
 # ── Blogger 게시 라벨 ────────────────────────────────────────
 def labels_for(topic_key: str):
-    base = ["공모전축제정보", TOPIC_LABELS[topic_key]]
+    base = ["생활정보", TOPIC_LABELS[topic_key]]
     return base
