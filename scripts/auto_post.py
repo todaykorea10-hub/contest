@@ -9,7 +9,8 @@
      (본문 + 핵심 키워드(태그)까지 함께 생성)
   4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤,
      헤더/광고/관련기사 영역을 제외한 본문에서만 이미지를 추출
-     (실제로 찾은 만큼만 사용, 억지로 개수를 채우지 않음),
+     (실제로 찾은 만큼만 사용, 억지로 개수를 채우지 않음. 같은 사진의
+      다른 크기 URL도 도메인+경로 기준으로 중복 판정),
      상단/중간/하단에 분산 배치
   5) Blogger API로 게시 (라벨 = 공통 라벨 + 주제 + 본문 키워드, 본문 하단에 해시태그),
      각 게시 사이에 무작위 대기 (스팸 방지)
@@ -207,6 +208,14 @@ def _remove_non_content_elements(scope):
         tag.decompose()
 
 
+def _image_identity_key(url: str):
+    """같은 사진을 크기·캐시 파라미터만 다르게 내보내는 경우까지 잡기 위해,
+    쿼리스트링을 무시하고 도메인+경로만으로 동일 이미지 여부를 판단한다."""
+    parsed = urllib.parse.urlsplit(url)
+    path = re.sub(r"/(thumb|thumbnail|small|medium|large|resize)[-_/]", "/", parsed.path.lower())
+    return (parsed.netloc.lower(), path)
+
+
 def extract_article_images(article_url: str):
     """기사 '본문' 영역의 이미지만 추출 (헤더/로고/광고/관련기사/아이콘 제외).
     실제로 찾은 이미지 수만큼만 반환하고, 개수를 억지로 채우지 않는다."""
@@ -266,17 +275,18 @@ def extract_article_images(article_url: str):
 
             images.append(src)
 
-        # 구글/광고 도메인 차단 + data URI 제외 + 중복 제거
+        # 구글/광고 도메인 차단 + data URI 제외 + 동일 사진(크기만 다른 URL 포함) 중복 제거
         filtered = []
-        seen = set()
+        seen_keys = set()
         for src in images:
             if src.startswith("data:"):
                 continue
             if any(d in src for d in BLOCKED_IMAGE_DOMAINS):
                 continue
-            if src in seen:
+            key = _image_identity_key(src)
+            if key in seen_keys:
                 continue
-            seen.add(src)
+            seen_keys.add(key)
             filtered.append(src)
 
         if not filtered:
