@@ -7,7 +7,7 @@
   2) Blogger에서 최근 게시글 제목을 가져와 중복(유사) 기사 제거
   3) 후보 기사 중 MAX_POSTS_PER_RUN개를 골라 Gemini로 블로그 글 재작성
      (본문 + 핵심 키워드(태그)까지 함께 생성)
-  4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤 대표 이미지 추출,
+  4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤 본문 이미지를 여러 장 추출,
      핫링크 우회 방식으로 삽입
   5) Blogger API로 게시 (라벨 = 공통 라벨 + 주제 + 본문 키워드, 본문 하단에 해시태그),
      각 게시 사이에 무작위 대기 (스팸 방지)
@@ -142,7 +142,7 @@ def is_duplicate(title: str, existing_titles) -> bool:
 
 
 # ────────────────────────────────────────────────────────────
-# 원문 기사 URL 디코딩 + 대표 이미지 추출
+# 원문 기사 URL 디코딩 + 이미지 추출
 # ────────────────────────────────────────────────────────────
 def resolve_real_url(google_news_link: str) -> str:
     """Google News RSS 링크를 실제 언론사 기사 URL로 변환 (googlenewsdecoder 사용)"""
@@ -155,24 +155,55 @@ def resolve_real_url(google_news_link: str) -> str:
     return google_news_link  # 실패 시 원래 링크 그대로 사용
 
 
-def extract_og_image(article_url: str):
-    # 구글 뉴스 리다이렉트가 안 풀린 상태면 이미지 추출을 시도하지 않음
-    # (news.google.com 자체 페이지의 로고/썸네일이 잡히는 걸 방지)
+def extract_article_images(article_url: str):
+    """본문 안의 이미지들을 여러 장 추출 (광고/아이콘/구글 자체 이미지는 제외)"""
     if "news.google.com" in article_url:
-        return None
+        return []
 
+    images = []
     try:
         resp = requests.get(article_url, headers={"User-Agent": UA}, timeout=10, allow_redirects=True)
         soup = BeautifulSoup(resp.text, "html.parser")
-        tag = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
-        if tag and tag.get("content"):
-            img_url = tag["content"]
-            if any(d in img_url for d in ("google.com", "gstatic.com", "googleusercontent.com")):
-                return None  # 구글 자체 로고/썸네일은 사용하지 않음
-            return img_url
+
+        # 1) og:image를 우선 후보로
+        og = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
+        if og and og.get("content"):
+            images.append(og["content"])
+
+        # 2) 본문으로 추정되는 영역의 <img> 태그들도 후보에 추가
+        container = (
+            soup.find("article")
+            or soup.find(attrs={"itemprop": "articleBody"})
+            or soup.find("div", class_=lambda c: c and ("article" in c or "content" in c or "view" in c))
+            or soup
+        )
+        for img in container.find_all("img"):
+            src = img.get("src") or img.get("data-src")
+            if not src:
+                continue
+            src = urllib.parse.urljoin(article_url, src)
+            images.append(src)
+
+        # 3) 필터링: 구글/광고/아이콘성 이미지, data URI 제외 + 중복 제거
+        blocked = ("google.com", "gstatic.com", "googleusercontent.com",
+                   "logo", "icon", "sprite", "button", "banner", "ad.", "ads.")
+        filtered = []
+        seen = set()
+        for src in images:
+            if src.startswith("data:"):
+                continue
+            if any(b in src.lower() for b in blocked):
+                continue
+            if src in seen:
+                continue
+            seen.add(src)
+            filtered.append(src)
+
+        return filtered[: cfg.MAX_IMAGES_PER_POST]
+
     except Exception as e:
-        print(f"[정보] 대표 이미지 추출 실패: {e}")
-    return None
+        print(f"[정보] 이미지 추출 실패: {e}")
+        return []
 
 
 # ────────────────────────────────────────────────────────────
@@ -231,12 +262,12 @@ TAGS: <본문 핵심 키워드 8~10개, 쉼표로 구분, 공백 없이 한 단�
     return title, body, tags
 
 
-def build_html(body_html: str, image_url: str, source_link: str, tags):
+def build_html(body_html: str, image_urls, source_link: str, tags):
     parts = []
-    if image_url:
+    for url in image_urls:
         parts.append(
-            f'<img src="{image_url}" referrerpolicy="no-referrer" '
-            f'style="width:100%;height:auto;" alt="관련 이미지"/>'
+            f'<img src="{url}" referrerpolicy="no-referrer" '
+            f'style="width:100%;height:auto;margin-bottom:8px;" alt="관련 이미지"/>'
         )
     parts.append(body_html)
 
@@ -302,12 +333,12 @@ def main():
                 print("  -> 재작성된 제목이 기존 글과 유사하여 건너뜀")
                 continue
 
-            image_url = extract_og_image(real_url)
-            html_content = build_html(body, image_url, real_url, tags)
+            image_urls = extract_article_images(real_url)
+            html_content = build_html(body, image_urls, real_url, tags)
             labels = cfg.labels_for(article["topic_key"], tags)
 
             result = publish_post(service, blog_id, title, html_content, labels)
-            print(f"  -> 게시 완료: {result.get('url')}")
+            print(f"  -> 게시 완료: {result.get('url')} (이미지 {len(image_urls)}장)")
 
             posted += 1
             posted_titles_this_run.append(title)
