@@ -6,8 +6,11 @@
   1) Google News RSS에서 '공모전'/'축제' 관련 최신 기사 수집
   2) Blogger에서 최근 게시글 제목을 가져와 중복(유사) 기사 제거
   3) 후보 기사 중 MAX_POSTS_PER_RUN개를 골라 Gemini로 블로그 글 재작성
-  4) 원문 기사의 대표 이미지를 추출해 핫링크 우회 방식으로 삽입
-  5) Blogger API로 게시, 각 게시 사이에 무작위 대기 (스팸 방지)
+     (본문 + 핵심 키워드(태그)까지 함께 생성)
+  4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤 대표 이미지 추출,
+     핫링크 우회 방식으로 삽입
+  5) Blogger API로 게시 (라벨 = 공통 라벨 + 주제 + 본문 키워드, 본문 하단에 해시태그),
+     각 게시 사이에 무작위 대기 (스팸 방지)
 
 GitHub Actions에서 스케줄 실행되며, 별도의 로컬 상태 파일 없이
 Blogger에 이미 올라간 글 목록을 기준으로 중복을 판단하므로 무상태(stateless)로 동작한다.
@@ -22,11 +25,11 @@ import xml.etree.ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
+from googlenewsdecoder import new_decoderv1
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from google import genai
-from googlenewsdecoder import new_decoderv1
 
 sys.path.append(os.path.dirname(__file__))
 import config_base as cfg
@@ -139,10 +142,10 @@ def is_duplicate(title: str, existing_titles) -> bool:
 
 
 # ────────────────────────────────────────────────────────────
-# 원문 기사 대표 이미지 추출
+# 원문 기사 URL 디코딩 + 대표 이미지 추출
 # ────────────────────────────────────────────────────────────
 def resolve_real_url(google_news_link: str) -> str:
-    """Google News RSS 링크를 실제 언론사 기사 URL로 변환"""
+    """Google News RSS 링크를 실제 언론사 기사 URL로 변환 (googlenewsdecoder 사용)"""
     try:
         result = new_decoderv1(google_news_link, interval=2)
         if result.get("status") and result.get("decoded_url"):
@@ -173,7 +176,7 @@ def extract_og_image(article_url: str):
 
 
 # ────────────────────────────────────────────────────────────
-# Gemini로 블로그 글 생성
+# Gemini로 블로그 글 생성 (본문 + 태그)
 # ────────────────────────────────────────────────────────────
 def generate_post(client, article, topic_key):
     topic_label = cfg.TOPIC_LABELS[topic_key]
@@ -204,31 +207,43 @@ def generate_post(client, article, topic_key):
 TITLE: <제목>
 BODY:
 <HTML 본문>
+TAGS: <본문 핵심 키워드 8~10개, 쉼표로 구분, 공백 없이 한 단어씩. 지역명/주최기관/분야명 등 실제 검색에 쓸만한 단어 위주>
 """
 
     resp = client.models.generate_content(model=cfg.GEMINI_MODEL, contents=prompt)
     text = resp.text or ""
 
-    title, body = None, None
+    title, body, tags = None, None, []
     if "TITLE:" in text and "BODY:" in text:
         title = text.split("TITLE:", 1)[1].split("BODY:", 1)[0].strip()
-        body = text.split("BODY:", 1)[1].strip()
+        rest = text.split("BODY:", 1)[1]
+        if "TAGS:" in rest:
+            body_part, tags_part = rest.split("TAGS:", 1)
+            body = body_part.strip()
+            tags = [t.strip() for t in tags_part.strip().split(",") if t.strip()]
+        else:
+            body = rest.strip()
     else:
         # 형식이 어긋났을 경우 폴백
         title = article["title"]
         body = f"<p>{text.strip()}</p>"
 
-    return title, body
+    return title, body, tags
 
 
-def build_html(body_html: str, image_url: str, source_link: str):
+def build_html(body_html: str, image_url: str, source_link: str, tags):
     parts = []
     if image_url:
         parts.append(
             f'<img src="{image_url}" referrerpolicy="no-referrer" '
-            f'style="max-width:100%;height:auto;" alt="관련 이미지"/>'
+            f'style="width:100%;height:auto;" alt="관련 이미지"/>'
         )
     parts.append(body_html)
+
+    if tags:
+        hashtags = " ".join(f"#{t.replace(' ', '')}" for t in tags[:10])
+        parts.append(f'<p style="color:#555;">{hashtags}</p>')
+
     parts.append(
         f'<p style="color:#888;font-size:0.85em;">참고: '
         f'<a href="{source_link}" target="_blank" rel="noopener nofollow">원문 기사 보기</a></p>'
@@ -281,15 +296,15 @@ def main():
         try:
             real_url = resolve_real_url(article["link"])
 
-            title, body = generate_post(gemini_client, article, article["topic_key"])
+            title, body, tags = generate_post(gemini_client, article, article["topic_key"])
 
             if is_duplicate(title, existing_titles + posted_titles_this_run):
                 print("  -> 재작성된 제목이 기존 글과 유사하여 건너뜀")
                 continue
 
             image_url = extract_og_image(real_url)
-            html_content = build_html(body, image_url, real_url)
-            labels = cfg.labels_for(article["topic_key"])
+            html_content = build_html(body, image_url, real_url, tags)
+            labels = cfg.labels_for(article["topic_key"], tags)
 
             result = publish_post(service, blog_id, title, html_content, labels)
             print(f"  -> 게시 완료: {result.get('url')}")
