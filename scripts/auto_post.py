@@ -8,8 +8,9 @@
   3) 후보 기사 중 MAX_POSTS_PER_RUN개를 골라 Gemini로 블로그 글 재작성
      (본문 + 핵심 키워드(태그)까지 함께 생성)
   4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤,
-     헤더/내비/푸터/로고를 제외한 본문 영역에서 이미지를 여러 장 추출,
-     핫링크 우회 방식으로 삽입
+     헤더/광고/관련기사 영역을 제외한 본문에서만 이미지를 추출
+     (실제로 찾은 만큼만 사용, 억지로 개수를 채우지 않음),
+     상단/중간/하단에 분산 배치
   5) Blogger API로 게시 (라벨 = 공통 라벨 + 주제 + 본문 키워드, 본문 하단에 해시태그),
      각 게시 사이에 무작위 대기 (스팸 방지)
 
@@ -165,13 +166,33 @@ BLOCKED_IMAGE_DOMAINS = (
 )
 # 언론사 로고/워터마크로 추정되는 힌트 (파일명·alt 속성에 이 단어가 있으면 제외)
 LOGO_HINT_WORDS = ("logo", "로고", "symbol", "ci_", "_ci.", "watermark", "masthead")
-# 헤더/내비/푸터 등 로고·배너가 위치하는 영역의 클래스명 힌트
+# 헤더/내비/푸터 등 로고·배너가 위치하는 영역의 클래스·id 힌트
 CHROME_CLASS_HINTS = ("header", "gnb", "footer", "sidebar", "lnb", "topbar", "navbar", "nav_")
+# 광고/관련기사/공유 위젯 등 본문이 아닌 영역의 클래스·id 힌트
+NON_CONTENT_HINTS = (
+    "ad", "banner", "relate", "recommend", "outbrain", "taboola",
+    "widget", "promotion", "sponsor", "share", "sns_", "reporter",
+    "byline", "copyright", "comment", "popular", "ranking",
+)
 MIN_IMAGE_DIMENSION = 150  # px, 명시적으로 이보다 작은 width/height는 아이콘류로 간주
 
 
+def _remove_non_content_elements(scope):
+    """헤더/내비/푸터 + 광고·관련기사·공유 위젯 등을 통째로 제거"""
+    for tag in scope.find_all(["header", "nav", "footer", "aside"]):
+        tag.decompose()
+    for tag in scope.find_all(class_=lambda c: c and any(h in c.lower() for h in CHROME_CLASS_HINTS)):
+        tag.decompose()
+    for tag in scope.find_all(True):
+        cls = " ".join(tag.get("class", [])).lower()
+        tid = (tag.get("id") or "").lower()
+        if any(h in cls or h in tid for h in NON_CONTENT_HINTS):
+            tag.decompose()
+
+
 def extract_article_images(article_url: str):
-    """기사 '본문' 영역의 이미지만 추출 (헤더/로고/광고/아이콘 제외)"""
+    """기사 '본문' 영역의 이미지만 추출 (헤더/로고/광고/관련기사/아이콘 제외).
+    실제로 찾은 이미지 수만큼만 반환하고, 개수를 억지로 채우지 않는다."""
     if "news.google.com" in article_url:
         print("  [이미지] 원문 URL 디코딩이 안 풀려서 이미지 추출을 건너뜀")
         return []
@@ -186,13 +207,7 @@ def extract_article_images(article_url: str):
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # 1) 헤더/내비게이션/푸터/사이드바 영역은 통째로 제거 (로고·배너가 있는 자리)
-        for tag in soup.find_all(["header", "nav", "footer", "aside"]):
-            tag.decompose()
-        for tag in soup.find_all(class_=lambda c: c and any(h in c.lower() for h in CHROME_CLASS_HINTS)):
-            tag.decompose()
-
-        # 2) og:image는 로고 힌트가 없을 때만 후보로 사용
+        # og:image는 로고 힌트가 없을 때만 후보로 사용 (제거 전에 미리 확보)
         images = []
         og = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
         if og and og.get("content"):
@@ -200,7 +215,10 @@ def extract_article_images(article_url: str):
             if not any(w in og_url.lower() for w in LOGO_HINT_WORDS):
                 images.append(og_url)
 
-        # 3) 본문으로 추정되는 영역만 탐색 (헤더 등 제거된 뒤이므로 fallback도 비교적 안전)
+        # 헤더/내비/푸터 + 광고/관련기사/공유 위젯 제거
+        _remove_non_content_elements(soup)
+
+        # 본문으로 추정되는 영역만 탐색
         container = (
             soup.find("article")
             or soup.find(attrs={"itemprop": "articleBody"})
@@ -231,7 +249,7 @@ def extract_article_images(article_url: str):
 
             images.append(src)
 
-        # 4) 구글/광고 도메인 차단 + data URI 제외 + 중복 제거
+        # 구글/광고 도메인 차단 + data URI 제외 + 중복 제거
         filtered = []
         seen = set()
         for src in images:
@@ -247,6 +265,7 @@ def extract_article_images(article_url: str):
         if not filtered:
             print(f"  [이미지] 이미지 태그 {len(images)}개 발견했지만 필터 후 0개")
 
+        # 실제로 찾은 만큼만 반환 (최대 MAX_IMAGES_PER_POST장, 억지로 채우지 않음)
         return filtered[: cfg.MAX_IMAGES_PER_POST]
 
     except Exception as e:
@@ -310,14 +329,47 @@ TAGS: <본문 핵심 키워드 8~10개, 쉼표로 구분, 공백 없이 한 단�
     return title, body, tags
 
 
+def insert_images_into_body(body_html: str, image_urls):
+    """이미지를 본문 안에 상단/중간/하단으로 분산 배치.
+    1장이면 상단에만, 2장이면 상단+하단, 3장이면 상단+중간+하단."""
+    if not image_urls:
+        return body_html
+
+    img_tags = [
+        f'<img src="{url}" referrerpolicy="no-referrer" '
+        f'style="width:100%;height:auto;margin:14px 0;" alt="관련 이미지"/>'
+        for url in image_urls
+    ]
+
+    if len(img_tags) == 1:
+        return img_tags[0] + "\n" + body_html
+
+    # 본문을 줄 단위 블록으로 나눠서, 이미지 개수+1 구간으로 균등 분배
+    blocks = [b for b in body_html.split("\n") if b.strip()]
+    n = len(img_tags)
+
+    if len(blocks) < n:
+        # 블록이 이미지 수보다 적으면 맨 앞/뒤로만 배치
+        return img_tags[0] + "\n" + body_html + "\n" + "\n".join(img_tags[1:])
+
+    positions = [max(1, round((i + 1) * len(blocks) / (n + 1))) for i in range(n)]
+
+    result = []
+    img_idx = 0
+    for i, block in enumerate(blocks):
+        if img_idx < n and i == positions[img_idx]:
+            result.append(img_tags[img_idx])
+            img_idx += 1
+        result.append(block)
+    while img_idx < n:
+        result.append(img_tags[img_idx])
+        img_idx += 1
+
+    return "\n".join(result)
+
+
 def build_html(body_html: str, image_urls, source_link: str, tags):
-    parts = []
-    for url in image_urls:
-        parts.append(
-            f'<img src="{url}" referrerpolicy="no-referrer" '
-            f'style="width:100%;height:auto;margin-bottom:8px;" alt="관련 이미지"/>'
-        )
-    parts.append(body_html)
+    parts = [insert_images_into_body(body_html, image_urls)]
 
     if tags:
         hashtags = " ".join(f"#{t.replace(' ', '')}" for t in tags[:10])
