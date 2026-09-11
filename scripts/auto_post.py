@@ -7,7 +7,8 @@
   2) Blogger에서 최근 게시글 제목을 가져와 중복(유사) 기사 제거
   3) 후보 기사 중 MAX_POSTS_PER_RUN개를 골라 Gemini로 블로그 글 재작성
      (본문 + 핵심 키워드(태그)까지 함께 생성)
-  4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤 본문 이미지를 여러 장 추출,
+  4) 원문 기사의 실제 URL을 googlenewsdecoder로 풀어낸 뒤,
+     헤더/내비/푸터/로고를 제외한 본문 영역에서 이미지를 여러 장 추출,
      핫링크 우회 방식으로 삽입
   5) Blogger API로 게시 (라벨 = 공통 라벨 + 주제 + 본문 키워드, 본문 하단에 해시태그),
      각 게시 사이에 무작위 대기 (스팸 방지)
@@ -156,23 +157,25 @@ def resolve_real_url(google_news_link: str) -> str:
     return google_news_link  # 실패 시 원래 링크 그대로 사용
 
 
-# 파일명 키워드(banner, ad 등)로 거르면 실제 기사 사진까지 오탐으로 걸러지는 경우가 많아서,
-# 도메인(구글/광고 네트워크)과 이미지 크기(아이콘 추정)만으로 판단한다.
+# 구글/광고 네트워크 도메인
 BLOCKED_IMAGE_DOMAINS = (
     "google.com", "gstatic.com", "googleusercontent.com",
     "doubleclick.net", "googlesyndication.com", "adservice.google",
     "facebook.com", "fbcdn.net",
 )
-MIN_IMAGE_DIMENSION = 150  # px, 이보다 작은 명시적 width/height는 아이콘류로 간주
+# 언론사 로고/워터마크로 추정되는 힌트 (파일명·alt 속성에 이 단어가 있으면 제외)
+LOGO_HINT_WORDS = ("logo", "로고", "symbol", "ci_", "_ci.", "watermark", "masthead")
+# 헤더/내비/푸터 등 로고·배너가 위치하는 영역의 클래스명 힌트
+CHROME_CLASS_HINTS = ("header", "gnb", "footer", "sidebar", "lnb", "topbar", "navbar", "nav_")
+MIN_IMAGE_DIMENSION = 150  # px, 명시적으로 이보다 작은 width/height는 아이콘류로 간주
 
 
 def extract_article_images(article_url: str):
-    """본문 안의 이미지들을 여러 장 추출 (구글/광고 도메인, 소형 아이콘만 제외)"""
+    """기사 '본문' 영역의 이미지만 추출 (헤더/로고/광고/아이콘 제외)"""
     if "news.google.com" in article_url:
         print("  [이미지] 원문 URL 디코딩이 안 풀려서 이미지 추출을 건너뜀")
         return []
 
-    images = []
     try:
         resp = requests.get(
             article_url,
@@ -183,38 +186,52 @@ def extract_article_images(article_url: str):
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # 1) og:image를 우선 후보로
+        # 1) 헤더/내비게이션/푸터/사이드바 영역은 통째로 제거 (로고·배너가 있는 자리)
+        for tag in soup.find_all(["header", "nav", "footer", "aside"]):
+            tag.decompose()
+        for tag in soup.find_all(class_=lambda c: c and any(h in c.lower() for h in CHROME_CLASS_HINTS)):
+            tag.decompose()
+
+        # 2) og:image는 로고 힌트가 없을 때만 후보로 사용
+        images = []
         og = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
         if og and og.get("content"):
-            images.append(urllib.parse.urljoin(article_url, og["content"]))
+            og_url = urllib.parse.urljoin(article_url, og["content"])
+            if not any(w in og_url.lower() for w in LOGO_HINT_WORDS):
+                images.append(og_url)
 
-        # 2) 본문으로 추정되는 영역의 <img> 태그들도 후보에 추가
+        # 3) 본문으로 추정되는 영역만 탐색 (헤더 등 제거된 뒤이므로 fallback도 비교적 안전)
         container = (
             soup.find("article")
             or soup.find(attrs={"itemprop": "articleBody"})
-            or soup.find("div", class_=lambda c: c and (
-                "article" in c or "art_view" in c or "news_view" in c or "articleView" in c
+            or soup.find(class_=lambda c: c and (
+                "article" in c or "art_view" in c or "news_view" in c
+                or "articleView" in c or "art_photo" in c or "photo_view" in c
             ))
             or soup
         )
+
         for img in container.find_all("img"):
             src = img.get("src") or img.get("data-src") or img.get("data-original")
             if not src:
                 continue
             src = urllib.parse.urljoin(article_url, src)
+            alt = (img.get("alt") or "").lower()
 
-            # 명시적으로 작은 크기가 지정된 이미지는 아이콘/로고로 간주하고 제외
+            if any(w in src.lower() for w in LOGO_HINT_WORDS) or any(w in alt for w in LOGO_HINT_WORDS):
+                continue
+
             try:
-                w = int(img.get("width", 0) or 0)
-                h = int(img.get("height", 0) or 0)
-                if (w and w < MIN_IMAGE_DIMENSION) or (h and h < MIN_IMAGE_DIMENSION):
+                w_ = int(img.get("width", 0) or 0)
+                h_ = int(img.get("height", 0) or 0)
+                if (w_ and w_ < MIN_IMAGE_DIMENSION) or (h_ and h_ < MIN_IMAGE_DIMENSION):
                     continue
             except ValueError:
                 pass
 
             images.append(src)
 
-        # 3) 구글/광고 도메인만 명확히 차단 + data URI 제외 + 중복 제거
+        # 4) 구글/광고 도메인 차단 + data URI 제외 + 중복 제거
         filtered = []
         seen = set()
         for src in images:
@@ -228,7 +245,7 @@ def extract_article_images(article_url: str):
             filtered.append(src)
 
         if not filtered:
-            print(f"  [이미지] 이미지 태그 {len(images)}개 발견했지만 필터 후 0개 (og:image 없음/전부 소형 이미지)")
+            print(f"  [이미지] 이미지 태그 {len(images)}개 발견했지만 필터 후 0개")
 
         return filtered[: cfg.MAX_IMAGES_PER_POST]
 
