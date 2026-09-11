@@ -51,7 +51,7 @@ MAX_SLEEP_BETWEEN_POSTS = 1200  # 초
 MAX_ATTEMPTS_PER_RUN = 10   # 실패 포함 최대 시도 횟수 (무한정 90개를 다 돌지 않도록)
 
 # ── Gemini 설정 ──────────────────────────────────────────────
-GEMINI_MODEL = "gemini-3.5-flash-lite"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 
 # 글 구조/각도를 매번 랜덤하게 섞어서 색인 다양성 확보 (기존 kpop 블로그 패턴과 동일)
 WRITING_ANGLES = [
