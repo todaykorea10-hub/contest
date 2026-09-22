@@ -31,10 +31,32 @@ from io import BytesIO
 import requests
 from bs4 import BeautifulSoup
 from PIL import Image
-try:
-    from googlenewsdecoder import decoderv1 as _gnd_decode
-except ImportError:
-    from googlenewsdecoder import new_decoderv1 as _gnd_decode
+
+# [수정] googlenewsdecoder 패키지가 버전에 따라 공개 함수 이름이 계속 바뀌어 왔다.
+#   - 예전 버전: decoderv1 / new_decoderv1, 반환값 {"status": bool, "decoded_url": ...}
+#   - 최신 버전: gnewsdecoder,               반환값 {"success": bool, "decoded_url": ...}
+# 어느 버전이 설치되어 있어도 죽지 않도록, 있는 이름을 순서대로 시도해서 하나의
+# 공통 함수(_gnd_decode)로 감싼다. 반환값의 "성공 여부" 키 이름도 함수마다 달라서
+# resolve_real_url() 쪽에서 status/success 둘 다 확인한다.
+_gnd_fn = None
+for _name in ("gnewsdecoder", "decoderv1", "new_decoderv1"):
+    try:
+        _gnd_fn = getattr(__import__("googlenewsdecoder", fromlist=[_name]), _name)
+        break
+    except (ImportError, AttributeError):
+        continue
+
+if _gnd_fn is None:
+    raise ImportError(
+        "googlenewsdecoder 패키지에서 gnewsdecoder/decoderv1/new_decoderv1 "
+        "중 어느 것도 찾지 못했습니다. requirements.txt의 googlenewsdecoder 버전을 확인하세요."
+    )
+
+
+def _gnd_decode(url, interval=2):
+    return _gnd_fn(url, interval=interval)
+
+
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -157,9 +179,11 @@ def resolve_real_url(google_news_link: str) -> str:
     """Google News RSS 링크를 실제 언론사 기사 URL로 변환 (googlenewsdecoder 사용)"""
     try:
         result = _gnd_decode(google_news_link, interval=2)
-        if result.get("status") and result.get("decoded_url"):
+        # [수정] 패키지 버전에 따라 성공 여부 키가 "status" 또는 "success"로 다르다.
+        ok = result.get("status", result.get("success"))
+        if ok and result.get("decoded_url"):
             return result["decoded_url"]
-        print(f"[정보] 뉴스 링크 디코딩 실패(status=False): {result.get('message')}")
+        print(f"[정보] 뉴스 링크 디코딩 실패: {result.get('message')}")
     except Exception as e:
         print(f"[정보] 뉴스 링크 디코딩 실패: {e}")
     return google_news_link  # 실패 시 원래 링크 그대로 사용
