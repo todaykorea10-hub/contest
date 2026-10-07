@@ -32,24 +32,25 @@ import requests
 from bs4 import BeautifulSoup
 from PIL import Image
 
-# [수정] googlenewsdecoder 패키지가 버전에 따라 공개 함수 이름이 계속 바뀌어 왔다.
-#   - 예전 버전: decoderv1 / new_decoderv1, 반환값 {"status": bool, "decoded_url": ...}
-#   - 최신 버전: gnewsdecoder,               반환값 {"success": bool, "decoded_url": ...}
-# 어느 버전이 설치되어 있어도 죽지 않도록, 있는 이름을 순서대로 시도해서 하나의
-# 공통 함수(_gnd_decode)로 감싼다. 반환값의 "성공 여부" 키 이름도 함수마다 달라서
-# resolve_real_url() 쪽에서 status/success 둘 다 확인한다.
+# [수정] googlenewsdecoder 로딩 방식 변경
+#   - 기존: __import__ + except ImportError 로 감싸서, 패키지 내부 의존성(selectolax 등)
+#     때문에 생긴 진짜 ImportError까지 삼키고 "함수를 못 찾았다"는 엉뚱한 메시지를 냈다.
+#   - 변경: 패키지 import는 따로 수행해서, 실패하면 원래 에러가 그대로 출력되게 한다.
+#     그 다음 버전별 함수 이름(gnewsdecoder / decoderv1 / new_decoderv1)을 찾는다.
+#   - selectolax 1.0 이상에서는 googlenewsdecoder가 깨지므로
+#     requirements.txt에 "selectolax<1.0"을 반드시 함께 고정해야 한다.
+import googlenewsdecoder as _gnd_mod
+
 _gnd_fn = None
 for _name in ("gnewsdecoder", "decoderv1", "new_decoderv1"):
-    try:
-        _gnd_fn = getattr(__import__("googlenewsdecoder", fromlist=[_name]), _name)
+    _gnd_fn = getattr(_gnd_mod, _name, None)
+    if _gnd_fn:
         break
-    except (ImportError, AttributeError):
-        continue
 
 if _gnd_fn is None:
     raise ImportError(
-        "googlenewsdecoder 패키지에서 gnewsdecoder/decoderv1/new_decoderv1 "
-        "중 어느 것도 찾지 못했습니다. requirements.txt의 googlenewsdecoder 버전을 확인하세요."
+        "googlenewsdecoder는 import됐지만 기대한 함수(gnewsdecoder/decoderv1/new_decoderv1)가 "
+        f"없습니다. 사용 가능한 이름: {dir(_gnd_mod)}"
     )
 
 
@@ -179,7 +180,7 @@ def resolve_real_url(google_news_link: str) -> str:
     """Google News RSS 링크를 실제 언론사 기사 URL로 변환 (googlenewsdecoder 사용)"""
     try:
         result = _gnd_decode(google_news_link, interval=2)
-        # [수정] 패키지 버전에 따라 성공 여부 키가 "status" 또는 "success"로 다르다.
+        # 패키지 버전에 따라 성공 여부 키가 "status" 또는 "success"로 다르다.
         ok = result.get("status", result.get("success"))
         if ok and result.get("decoded_url"):
             return result["decoded_url"]
